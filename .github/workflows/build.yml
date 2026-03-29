@@ -12,14 +12,16 @@ permissions:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build All Targets (Sequential)
     runs-on: ubuntu-22.04
     env:
       IMAGE_NAME: ghcr.io/nuaa-xtyf/vision-final-test-dev-env
-    strategy:
-      fail-fast: false  # Ensure one failure doesn't cancel other jobs
-      matrix:
-        target: [standard_gcy, standard_hjy, standard_wwj, standard_yx, standard_zzy]
+      BUILD_TARGETS: |
+        standard_gcy
+        standard_hjy
+        standard_wwj
+        standard_yx
+        standard_zzy
 
     steps:
     - uses: actions/checkout@v4
@@ -34,10 +36,46 @@ jobs:
     - name: Pull Build Image
       run: docker pull ${IMAGE_NAME}:latest
 
+    - name: Prepare Build Status
+      run: |
+        rm -rf .ci_status
+        mkdir -p .ci_status
+
     - name: Configure CMake
       run: |
         docker run --rm --user root -v ${{ github.workspace }}:/workspaces/Vision-Final-Test -w /workspaces/Vision-Final-Test ${IMAGE_NAME}:latest /bin/bash -c "source /opt/ros/humble/setup.bash && source /opt/intel/openvino_2024/setupvars.sh && cmake -B build -DCMAKE_BUILD_TYPE=Release"
 
-    - name: Build Target
+    - name: Build Targets Sequentially
       run: |
-        docker run --rm --user root -v ${{ github.workspace }}:/workspaces/Vision-Final-Test -w /workspaces/Vision-Final-Test ${IMAGE_NAME}:latest /bin/bash -c "source /opt/ros/humble/setup.bash && source /opt/intel/openvino_2024/setupvars.sh && cmake --build build --target ${{ matrix.target }} --parallel"
+        while IFS= read -r target; do
+          [ -z "$target" ] && continue
+          echo "Building target: $target"
+          set +e
+          docker run --rm --user root -v ${{ github.workspace }}:/workspaces/Vision-Final-Test -w /workspaces/Vision-Final-Test ${IMAGE_NAME}:latest /bin/bash -c "source /opt/ros/humble/setup.bash && source /opt/intel/openvino_2024/setupvars.sh && cmake --build build --target $target"
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo PASS > ".ci_status/${target}.status"
+          else
+            echo FAIL > ".ci_status/${target}.status"
+          fi
+        done <<< "${BUILD_TARGETS}"
+
+    - name: Final Result
+      if: always()
+      run: |
+        failed_targets=""
+        while IFS= read -r target; do
+          [ -z "$target" ] && continue
+          status_file=".ci_status/${target}.status"
+          if [ ! -f "$status_file" ] || [ "$(cat "$status_file")" != "PASS" ]; then
+            failed_targets="$failed_targets $target"
+          fi
+        done <<< "${BUILD_TARGETS}"
+
+        if [ -n "$failed_targets" ]; then
+          echo "Failed targets:$failed_targets"
+          exit 1
+        fi
+
+        echo "All targets built successfully."
